@@ -58,32 +58,4 @@ pub const Plugin = struct {
     /// Returns:
     ///   - `void`. This function does not return a value.
     run: *const fn (key: []u8, value: []u8) void,
-
-    fn init(name: []u8) Plugin {
-        const dynLib = loadSystemLibrary(name);
-        const run = dynLib.findSymbol("run") orelse return error.SymbolNotFound;
-        return @ptrCast(run());
-    }
-
-    pub fn loadSystemLibrary(lib_name: []const u8) !std.DynLib {
-        var buffer: [128]u8 = undefined;
-
-        // Construct correct library filename for Linux and macOS
-        const lib_full_name = switch (std.builtin.os.tag) {
-            .linux => blk: {
-                const len = try std.fmt.bufPrint(&buffer, "lib{s}.so", .{lib_name});
-                break :blk buffer[0..len];
-            },
-            .macos => blk: {
-                const len = try std.fmt.bufPrint(&buffer, "lib{s}.dylib", .{lib_name});
-                break :blk buffer[0..len];
-            },
-            else => return error.UnsupportedOS,
-        };
-
-        std.debug.print("Loading system library: {s}\n", .{lib_full_name});
-
-        // Load library from native OS paths
-        return std.DynLib.open(lib_full_name);
-    }
 };
