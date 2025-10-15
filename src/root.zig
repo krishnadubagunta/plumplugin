@@ -16,46 +16,46 @@
 /// - `After*` hooks run after an operation completes, enabling post-processing or side effects
 ///
 /// This enum-based approach allows for type-safe hook registration and dispatch.
-const std = @import("std");
+pub const hook = @import("hook.zig");
+pub const plugin = @import("plugin.zig");
 const builtin = @import("builtin");
-const native = builtin.os;
+const std = @import("std");
+const allocator = std.heap.page_allocator;
+const native = builtin.os.tag;
 
-pub const HookType = enum {
-    /// Triggered before retrieving a key's value
-    BeforeGet,
-    /// Triggered before saving a key-value pair
-    BeforeSave,
-    /// Triggered before deleting a key
-    BeforeDelete,
-    /// Triggered after retrieving a key's value
-    AfterGet,
-    /// Triggered after saving a key-value pair
-    AfterSave,
-    /// Triggered after deleting a key
-    AfterDelete,
-};
+pub fn loadPlugin(name: []const u8) error{ PluginLoadFailed, OutOfMemory, NoSpaceLeft }!*const plugin.Plugin {
+    const buffer: []u8 = try std.mem.Allocator.alloc(allocator, u8, name.len + 9);
 
-/// `Plugin` represents an extension module that can hook into the database operations.
-///
-/// Each plugin has:
-/// - A name for identification
-/// - A hook type specifying when it should be executed
-/// - A function that will be called when the hook triggers
-///
-/// The plugin's run function receives the operation's key and value as parameters,
-/// allowing it to inspect or modify the data being processed.
-pub const Plugin = struct {
-    /// Unique identifier for the plugin
-    name: []const u8,
-    /// The point in execution where this plugin should be triggered
-    hook: HookType,
-    /// Function to call when the hook is triggered.
-    ///
-    /// Parameters:
-    ///   - `key`: The key involved in the database operation.
-    ///   - `value`: The value involved in the database operation.
-    ///
-    /// Returns:
-    ///   - `void`. This function does not return a value.
-    run: *const fn (key: []u8, value: []u8) void,
-};
+    // Construct correct library filename for Linux and macOS
+    const lib_full_name = switch (native) {
+        .linux => blk: {
+            const buf = std.fmt.bufPrint(buffer, "lib{s}.so", .{name}) catch |err| {
+                std.debug.print("Failed to format buffer: {}\n", .{err});
+                return error.PluginLoadFailed;
+            };
+            break :blk buf;
+        },
+        .macos => blk: {
+            const buf = std.fmt.bufPrint(buffer, "lib{s}.dylib", .{name}) catch |err| {
+                std.debug.print("Failed to format buffer: {}\n", .{err});
+                return error.PluginLoadFailed;
+            };
+            break :blk buf;
+        },
+        else => return error.UnsupportedOS,
+    };
+
+    std.debug.print("Loading system library: {s}\n", .{lib_full_name});
+
+    var lib = std.DynLib.open(lib_full_name) catch |err| {
+        std.debug.print("Failed to load library: {}\n", .{err});
+        return error.PluginLoadFailed;
+    };
+
+    const LoadFn = *const fn () *const plugin.Plugin;
+    const loadFn = lib.lookup(LoadFn, "load") orelse return error.PluginLoadFailed;
+
+    const pluginInstance = loadFn();
+
+    return pluginInstance;
+}
