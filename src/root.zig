@@ -25,6 +25,8 @@ const native = builtin.os.tag;
 
 pub fn loadPlugin(name: []const u8) error{ PluginLoadFailed, OutOfMemory, NoSpaceLeft }!*const plugin.Plugin {
     const buffer: []u8 = try std.mem.Allocator.alloc(allocator, u8, name.len + 9);
+    // Only needed to open the library, which does not keep a reference to the name.
+    defer allocator.free(buffer);
 
     // Construct correct library filename for Linux and macOS
     const lib_full_name = switch (native) {
