@@ -2,13 +2,13 @@
 
 The plugin interface for [PlumCache](https://github.com/krishnadubagunta/plumcache), an in-memory key-value store written in Zig.
 
-This package defines the types shared by PlumCache and its plugins, plus a function that loads a plugin from a dynamic library.
+This package defines what PlumCache and its plugins share: the Plum data structure (`PlumTrie`, `PlumAtom`, `PurePlumAtom` and `InternPool`), the plugin interface, and the functions that export and load plugins.
 
-> **Note:** PlumCache currently loads plugins at startup but does not call their hooks. A plugin cannot change how the server behaves yet.
+PlumCache runs each plugin on its own worker and passes every hook a snapshot of its trie. For when hooks run and what they may change, see the [PlumCache README](https://github.com/krishnadubagunta/plumcache#plugins).
 
 ## Requirements
 
-- Zig. `build.zig.zon` declares 0.15.1 as the minimum. PlumCache requires 0.17.1 or later.
+- Zig 0.17.1 or later
 - macOS or Linux
 
 ## Installation
@@ -30,7 +30,7 @@ Here `lib` is your own compile step.
 
 ## Writing a plugin
 
-A plugin is a dynamic library that exports a function named `load`. It returns a pointer to a `Plugin`.
+A plugin is a dynamic library that provides one `Plugin`. Call `exportPlugin` once to export it. This adds the `load` function and the compatibility fingerprint that `loadPlugin` checks.
 
 `my_plugin.zig`:
 
@@ -39,7 +39,7 @@ const std = @import("std");
 const plumplugin = @import("plumplugin");
 const Plugin = plumplugin.plugin.Plugin;
 
-fn run(key: []u8, value: []u8) void {
+fn run(_: *plumplugin.PlumTrie, key: []u8, value: []u8) void {
     std.debug.print("saved {s} = {s}\n", .{ key, value });
 }
 
@@ -49,12 +49,12 @@ const instance: Plugin = .{
     .run = run,
 };
 
-export fn load() *const Plugin {
-    return &instance;
+comptime {
+    plumplugin.exportPlugin(&instance);
 }
 ```
 
-The host keeps the returned pointer, so it must stay valid after `load` returns. Declare the `Plugin` at the top level, as above, not as a local variable.
+The host keeps a pointer to the `Plugin`, so declare it at the top level, as above.
 
 Build it as a dynamic library. In `build.zig`:
 
@@ -82,7 +82,7 @@ pub fn build(b: *std.Build) void {
 
 `zig build` then writes `libmy_plugin.dylib` (macOS) or `libmy_plugin.so` (Linux) to `zig-out/lib`.
 
-`Plugin` is a regular Zig struct, not an `extern struct`, so Zig does not guarantee its memory layout across separate builds. Build the plugin and the host with the same Zig version and the same version of plumplugin.
+A plugin runs its own compiled copy of the trie code on the host's memory. Build both with the same Zig version, plumplugin source and build mode. `loadPlugin` rejects a library whose `fingerprint` differs, which covers `abi_version`, the Zig version, build mode and type sizes. It cannot detect every difference, so increase `abi_version` when a change requires plugins to be rebuilt.
 
 ## Using a plugin with PlumCache
 
@@ -112,7 +112,7 @@ On Linux, the equivalent variable is `LD_LIBRARY_PATH`.
 | --- | --- | --- |
 | `name` | `[]const u8` | Plugin name. |
 | `hook` | `hook.HookType` | When the plugin is meant to run. |
-| `run` | `*const fn (key: []u8, value: []u8) void` | Function to run for that hook. It returns nothing, so it cannot report an error. |
+| `run` | `*const fn (trie: *PlumTrie, key: []u8, value: []u8) void` | Function to run for that hook. It returns nothing, so it cannot report an error. |
 
 ### `hook.HookType`
 
@@ -125,13 +125,28 @@ On Linux, the equivalent variable is `LD_LIBRARY_PATH`.
 | `AfterSave` | After saving a key-value pair. |
 | `AfterDelete` | After deleting a key. |
 
+### Data structure
+
+`PlumTrie`, `PlumAtom`, `PurePlumAtom` and `InternPool` are exported from the root module.
+
+`trie.hash()` and `node.hash()` return a SHA3-256 [Merkle hash](https://en.wikipedia.org/wiki/Merkle_tree) covering a node and everything below it: each segment, value and `modified_at`, plus the child hashes in segment order. `created_at`, access data and the delimiter are not included. A write changes the hashes from the written node up to the root, so a branch with an unchanged hash can be skipped. Writing the same value again also changes them, because `modified_at` changes. Hashes are calculated when requested and cached until a `set` or `delete` below them. Nodes with more than 64 children hash them in 256 groups. Hashing a trie is not thread-safe. Keys are split on the trie's delimiter. Change a trie passed to a hook only through its `set` and `delete` methods.
+
+### `Snapshot`
+
+`Snapshot.create(live)` makes a private copy of a trie, which another thread can change. `snapshot.mergeInto(live)` applies its changes: the latest write wins, a delete removes only values written before it, and reads add to the access data. Create and merge on the thread that owns the live trie, and destroy every snapshot before it. After creating a snapshot, the live trie records its deletes; call `forgetDeletions` once no older snapshot remains to be merged. The [PlumCache architecture document](https://github.com/krishnadubagunta/plumcache/blob/main/docs/architecture.md) describes the structure.
+
+### `exportPlugin(instance)`
+
+Exports a `*const plugin.Plugin` known at compile time. Call it in a top-level `comptime` block.
+
 ### `loadPlugin(name: []const u8)`
 
-Opens `lib<name>.dylib` or `lib<name>.so`, calls its `load` function and returns the resulting `*const plugin.Plugin`. It prints the library's file name to standard error.
+Opens `lib<name>.dylib` or `lib<name>.so`, checks its fingerprint, calls its `load` function and returns the resulting `*const plugin.Plugin`. It prints the library's file name to standard error.
 
 | Error | Cause |
 | --- | --- |
 | `PluginLoadFailed` | The library could not be opened, or it does not export `load`. |
+| `IncompatiblePlugin` | The library has no fingerprint, or its fingerprint differs from the host's. |
 | `OutOfMemory` | The library's file name could not be allocated. |
 
 The error set also includes `NoSpaceLeft`. The library stays open after loading, and there is no function to unload it.
